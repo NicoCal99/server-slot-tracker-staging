@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <base target="_top">
+  <title>Server Slot Tracker</title>
+  <style>
+    body { font-family: sans-serif; padding: 16px; }
+    h1 { font-size: 24px; margin-bottom: 16px; }
+    #header-info { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
+    #legend { font-size: 14px; }
+    .legend-item { display: inline-flex; align-items: center; margin-right: 16px; }
+    .legend-color { width:12px; height:12px; margin-right:4px; border:1px solid #ccc; }
+    .legend-color.in-use    { background: lightcoral; }
+    .legend-color.done      { background: lightgreen; }
+    .legend-color.inactive  { background: lightgray; background-image: repeating-linear-gradient(45deg, rgba(0,0,0,0.1) 0, rgba(0,0,0,0.1) 2px, transparent 2px, transparent 4px); }
+    #summary { font-size:14px; }
+    #summary div { margin-bottom:4px; }
+    #controls { display: grid; grid-template-columns: repeat(3,1fr); gap:16px; margin-bottom:16px; }
+    #controls div { display: flex; flex-direction: column; gap:4px; }
+    #controls input, #controls button { padding:4px 8px; }
+    #next-list { font-size:13px; margin-bottom:16px; }
+    h2 { margin-top:24px; }
+    .row-group { display:flex; gap:32px; margin-bottom:32px; }
+    .server-wrapper { display:flex; flex-direction:column; align-items:center; }
+    .server-wrapper h3 { margin:0 0 8px; }
+    .grids { display:grid; grid-template-columns:repeat(6,60px); grid-auto-rows:100px; gap:8px; justify-items:center; }
+    .slot { position:relative; border:1px solid #ccc; border-radius:4px; background:#eee; display:flex; justify-content:center; align-items:center; cursor:pointer; transition:background-color 0.3s; }
+    .slot.in-use    { background: lightcoral; }
+    .slot.done      { background: lightgreen; }
+    .slot.inactive  { background: lightgray; background-image: repeating-linear-gradient(45deg, rgba(0,0,0,0.1) 0, rgba(0,0,0,0.1) 2px, transparent 2px, transparent 4px); }
+    .slot .timer    { position:absolute; bottom:4px; font-size:12px; }
+    #hover-tooltip { position:absolute; background:rgba(0,0,0,0.75); color:#fff; padding:4px 8px; border-radius:4px; font-size:12px; pointer-events:none; z-index:1000; display:none; }
+  </style>
+  <script>
+    // Injected by Apps Script
+    const CURRENT_USER = '<?!= currentUser ?>';
+    const CURRENT_ROLE = '<?!= currentRole ?>';
+    const LOG_URL      = '<?!= ScriptApp.getService().getUrl() ?>';
+
+    document.addEventListener('DOMContentLoaded', () => {
+      if (CURRENT_ROLE !== 'admin') {
+        document.querySelectorAll('[data-admin]').forEach(btn => btn.disabled = true);
+      }
+      const DURATION = 30000;
+      const slots    = {};
+      let mode       = null;
+      const tooltip  = document.getElementById('hover-tooltip');
+
+      function bind(startId, endId, inputId, action, label) {
+        document.getElementById(startId).addEventListener('click', () => {
+          const name = document.getElementById(inputId).value.trim();
+          if (!name) return alert(`Enter ${label} name.`);
+          if (mode && mode !== action) return alert(`Finish ${mode} first.`);
+          mode = action;
+        });
+        document.getElementById(endId).addEventListener('click', () => {
+          if (mode !== action) return alert(`Not in ${label} mode.`);
+          mode = null;
+        });
+      }
+      bind('logStart','logEnd','uploader','upload_started','Log');
+      bind('colStart','colEnd','collector','collected','Collect');
+      bind('actStart','actEnd','activator','activated','Activate');
+      bind('deactStart','deactEnd','deactivator','inactivated','Deactivate');
+
+      function createSlot(id, container) {
+        const el = document.createElement('div');
+        el.className = 'slot';
+        el.title     = id;
+        el.innerHTML = `<div class="content">${id}</div><div class="timer"></div>`;
+        el.addEventListener('mouseenter', () => {
+          tooltip.textContent = el.title;
+          tooltip.style.display = 'block';
+        });
+        el.addEventListener('mousemove', e => {
+          tooltip.style.top  = e.pageY + 10 + 'px';
+          tooltip.style.left = e.pageX + 10 + 'px';
+        });
+        el.addEventListener('mouseleave', () => tooltip.style.display = 'none');
+        el.addEventListener('click', () => handleSlotClick(id));
+        container.appendChild(el);
+        slots[id] = { id, el, state: 'idle', end: 0 };
+      }
+
+      function initGrids() {
+        const rows = ['A','B','C','D','E','F'];
+        const r1 = document.getElementById('row1-440');
+        const r2 = document.getElementById('row2-440');
+        ['S1','S2','S3','S4','S5','S6'].forEach((srv, i) => {
+          const wrapper = document.createElement('div');
+          wrapper.className = 'server-wrapper';
+          const header = document.createElement('h3');
+          header.textContent = `Server ${i+1}`;
+          const grid = document.createElement('div');
+          grid.className = 'grids';
+          wrapper.append(header, grid);
+          (i < 3 ? r1 : r2).append(wrapper);
+          rows.forEach(r => {
+            for (let x = 1; x <= 6; x++) createSlot(`440-${srv}-${r}${x}`, grid);
+          });
+        });
+        const ga = document.getElementById('grids-255a');
+        ['A'].forEach(r => { for (let x = 1; x <= 6; x++) createSlot(`255-S1-${r}${x}`, ga); });
+        const gb = document.getElementById('grids-255b');
+        rows.forEach(r => { for (let x = 1; x <= 6; x++) createSlot(`255-S2-${r}${x}`, gb); });
+      }
+
+      function updateUI(s) {
+        s.el.classList.remove('in-use','done','inactive');
+        s.el.querySelector('.timer').textContent = '';
+        let tip = `${s.id} - ${s.state}`;
+        if (s.state === 'in-use') {
+          const opts = { hour: 'numeric', minute: '2-digit', hour12: true };
+          tip += ` until ${new Date(s.end).toLocaleTimeString([], opts)}`;
+        }
+        s.el.title = tip;
+        if (s.state === 'in-use')   s.el.classList.add('in-use');
+        if (s.state === 'done')     s.el.classList.add('done');
+        if (s.state === 'inactive') s.el.classList.add('inactive');
+      }
+
+      function handleSlotClick(id) {
+        if (!mode) return;
+        const s = slots[id];
+        const [room, srv, sl] = id.split('-');
+        if (mode === 'upload_started' && s.state !== 'idle') return;
+        if (mode === 'collected'      && s.state !== 'done') return;
+        if (mode === 'activated'      && s.state !== 'inactive') return;
+        if (mode === 'inactivated'    && !['idle','done'].includes(s.state)) return;
+        if (mode === 'upload_started')    { s.state = 'in-use';    s.end = Date.now() + DURATION; }
+        else if (mode === 'collected')    { s.state = 'idle';      s.end = 0;              }
+        else if (mode === 'activated')    { s.state = 'idle';      s.end = 0;              }
+        else if (mode === 'inactivated')  { s.state = 'inactive';  s.end = 0;              }
+        updateUI(s); updateCounts(); updateNext(); logEvent(mode, room, srv, sl);
+      }
+
+      function refreshState() {
+        fetch(`${LOG_URL}?mode=getState&_=${Date.now()}`, { cache: 'no-cache' })
+          .then(res => res.json())
+          .then(data => {
+            Object.values(slots).forEach(s => {
+              const entry = data[s.id];
+              if (entry) { s.state = entry.status; s.end = entry.end; updateUI(s); }
+            });
+            updateCounts(); updateNext();
+          })
+          .catch(console.error);
+      }
+
+      function tick() {
+        const now = Date.now();
+        Object.values(slots).forEach(s => {
+          if (s.state === 'in-use') {
+            const rem = s.end - now;
+            if (rem <= 0) {
+              s.state = 'done'; updateUI(s);
+              const [r, sv, sl] = s.id.split('-'); logEvent('upload_done', r, sv, sl);
+            } else {
+              s.el.querySelector('.timer').textContent = `${Math.ceil(rem/1000)}s`;
+            }
+          }
+        });
+      }
+
+      function updateCounts() {
+        let total=0, c1=0, c2=0;
+        Object.values(slots).forEach(s => { if (s.state === 'done') { total++; s.id.startsWith('440-')?c1++:c2++; }});
+        document.getElementById('total').textContent = `Total Ready: ${total}`;
+        document.getElementById('r440').textContent = `440 Ready: ${c1}`;
+        document.getElementById('r255').textContent = `255 Ready: ${c2}`;
+      }
+
+      function updateNext() {
+        const now = Date.now();
+        const next = Object.values(slots)
+          .filter(s => s.state === 'in-use' && s.end > now)
+          .sort((a, b) => a.end - b.end)
+          .slice(0, 5);
+        const container = document.getElementById('next-list');
+        container.innerHTML = '<strong>Next Slots:</strong>';
+        next.forEach(o => { const d = document.createElement('div'); d.textContent = `${o.id} → ${Math.ceil((o.end-now)/1000)}s`; container.appendChild(d); });
+      }
+
+      function logEvent(action, room, server, slot) {
+        const params = new URLSearchParams({ action, room, server, slot, user: CURRENT_USER });
+        fetch(`${LOG_URL}?${params}`, { cache: 'no-cache' })
+          .then(res => res.json()).then(data => { if (data.status === 'ok') refreshState(); })
+          .catch(console.error);
+      }
+
+      initGrids(); refreshState(); setInterval(tick, 500);
+    });
+  </script>
+</head>
+<body>
+  <h1>Server Slot Tracker Preview</h1>
+  <div id="header-info">
+    <div id="legend">
+      <span class="legend-item"><span class="legend-color in-use"></span>In Use</span>
+      <span class="legend-item"><span class="legend-color done"></span>Done</span>
+      <span class="legend-item"><span class="legend-color inactive"></span>Inactive</span>
+    </div>
+    <div id="summary">
+      <div id="total">Total Ready: 0</div>
+      <div id="r440">440 Ready: 0</div>
+      <div id="r255">255 Ready: 0</div>
+    </div>
+  </div>
+  <div id="controls">
+    <div>
+      <input id="uploader" placeholder="Uploader…" />
+      <button id="logStart">Start Log</button>
+      <button id="logEnd">End Log</button>
+    </div>
+    <div>
+      <input id="collector" placeholder="Collector…" />
+      <button id="colStart">Start Collect</button>
+      <button id="colEnd">End Collect</button>
+    </div>
+    <div>
+      <input id="activator" placeholder="Activator…" />
+      <button id="actStart" data-admin>Start Activate</button>
+      <button id="actEnd" data-admin>End Activate</button>
+    </div>
+    <div>
+      <input id="deactivator" placeholder="Deactivator…" />
+      <button id="deactStart" data-admin>Start Deactivate</button>
+      <button id="deactEnd" data-admin>End Deactivate</button>
+    </div>
+  </div>
+  <div id="next-list"></div>
+  <h2>Room 440</h2>
+  <div id="wrapper-440">
+    <div class="row-group" id="row1-440"></div>
+    <div class="row-group" id="row2-440"></div>
+  </div>
+  <h2>Room 255</h2>
+  <div class="row-group">
+    <div class="server-wrapper"><h3>Server 1</h3><div id="grids-255a" class="grids"></div></div>
+    <div class="server-wrapper"><h3>Server 2</h3><div id="grids-255b" class="grids"></div></div>
+  </div>
+  <div id="hover-tooltip"></div>
+</body>
+</html>
